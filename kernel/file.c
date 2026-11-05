@@ -12,6 +12,7 @@
 #include "file.h"
 #include "stat.h"
 #include "proc.h"
+#include "sysinfo.h"
 
 struct devsw devsw[NDEV];
 struct {
@@ -180,3 +181,59 @@ filewrite(struct file *f, uint64 addr, int n)
   return ret;
 }
 
+
+// Index of f in ftable.file[].
+int
+fileindex(struct file *f)
+{
+  return f - ftable.file;
+}
+
+// For sysinfo(): copy one struct fileinfo for every open entry
+// (ref > 0) of ftable to user address dst (an array of
+// struct fileinfo). Return the number of entries, or -1.
+int
+filesysinfo(uint64 dst)
+{
+  struct proc *p = myproc();
+  struct fileinfo fi;
+  struct file *f;
+  int n = 0;
+
+  for(f = ftable.file; f < ftable.file + NFILE; f++){
+    // snapshot the entry under ftable.lock so that ref and the
+    // list of referencing processes are consistent.
+    acquire(&ftable.lock);
+    if(f->ref == 0){
+      release(&ftable.lock);
+      continue;
+    }
+    memset(&fi, 0, sizeof(fi));
+    fi.idx = f - ftable.file;
+    fi.type = f->type;
+    fi.readable = f->readable;
+    fi.writable = f->writable;
+    fi.ref = f->ref;
+    fi.inum = -1;
+    fi.itype = -1;
+    fi.major = -1;
+    // f->ip stays valid while ref > 0. inum never changes;
+    // type is read without the inode sleep-lock (cannot sleep
+    // while holding a spinlock), which is fine for an open inode.
+    if((f->type == FD_INODE || f->type == FD_DEVICE) && f->ip){
+      fi.inum = f->ip->inum;
+      fi.itype = f->ip->type;
+    }
+    if(f->type == FD_DEVICE)
+      fi.major = f->major;
+    if(f->type == FD_INODE)
+      fi.off = f->off;
+    fi.npid = procfilerefs(f, fi.pids, &fi.nfd);
+    release(&ftable.lock);
+
+    if(copyout(p->pagetable, dst + n * sizeof(fi), (char *)&fi, sizeof(fi)) < 0)
+      return -1;
+    n++;
+  }
+  return n;
+}

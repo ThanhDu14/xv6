@@ -5,6 +5,9 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "sysinfo.h"
+
+#define offsetof(type, member) __builtin_offsetof(type, member)
 
 uint64
 sys_exit(void)
@@ -101,5 +104,33 @@ sys_trace(void)
 
   argint(0, &mask);
   myproc()->tracemask = mask;
+  return 0;
+}
+
+// sysinfo(struct sysinfo *info): collect the open files of the
+// whole system and the processes that are not UNUSED, and copy
+// them to the user's struct sysinfo. Return 0, or -1 on a bad
+// pointer.
+uint64
+sys_sysinfo(void)
+{
+  uint64 addr;
+  int nfile, nproc;
+  struct proc *p = myproc();
+
+  argaddr(0, &addr);
+
+  nfile = filesysinfo(addr + offsetof(struct sysinfo, files));
+  if(nfile < 0)
+    return -1;
+  nproc = procsysinfo(addr + offsetof(struct sysinfo, procs));
+  if(nproc < 0)
+    return -1;
+
+  if(copyout(p->pagetable, addr + offsetof(struct sysinfo, nfile),
+             (char *)&nfile, sizeof(nfile)) < 0 ||
+     copyout(p->pagetable, addr + offsetof(struct sysinfo, nproc),
+             (char *)&nproc, sizeof(nproc)) < 0)
+    return -1;
   return 0;
 }

@@ -105,4 +105,5 @@ struct proc {
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
   int tracemask;               // Bitmask of syscalls to trace
+  int nsched;                  // Times picked by scheduler (p->lock)
 };

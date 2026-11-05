@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sysinfo.h"
 
 struct cpu cpus[NCPU];
 
@@ -124,6 +125,7 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->nsched = 0;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -466,6 +468,7 @@ scheduler(void)
         // to release its lock and then reacquire it
         // before jumping back to us.
         p->state = RUNNING;
+        p->nsched++;
         c->proc = p;
         swtch(&c->context, &p->context);
 
@@ -696,4 +699,76 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+// For sysinfo(): find the processes whose ofile[] refers to f.
+// Store their pids in pids[] (at most NPROC, each pid once),
+// the total number of such fds in *nfd, and return the number
+// of processes. Called with ftable.lock held (lock order:
+// ftable.lock, then p->lock).
+int
+procfilerefs(struct file *f, int *pids, int *nfd)
+{
+  struct proc *p;
+  int fd, cnt, npid = 0;
+
+  *nfd = 0;
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state != UNUSED){
+      cnt = 0;
+      for(fd = 0; fd < NOFILE; fd++)
+        if(p->ofile[fd] == f)
+          cnt++;
+      if(cnt > 0){
+        pids[npid++] = p->pid;
+        *nfd += cnt;
+      }
+    }
+    release(&p->lock);
+  }
+  return npid;
+}
+
+// For sysinfo(): copy one struct procinfo for every process whose
+// state is not UNUSED to user address dst (an array of struct
+// procinfo). Return the number of entries, or -1.
+int
+procsysinfo(uint64 dst)
+{
+  struct proc *me = myproc();
+  struct procinfo pi;
+  struct proc *p;
+  struct file *f;
+  int fd, n = 0;
+
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&wait_lock);   // protects p->parent
+    acquire(&p->lock);
+    if(p->state == UNUSED){
+      release(&p->lock);
+      release(&wait_lock);
+      continue;
+    }
+    memset(&pi, 0, sizeof(pi));
+    pi.pid = p->pid;
+    pi.state = p->state;
+    pi.ppid = p->parent ? p->parent->pid : 0;
+    pi.nsched = p->nsched;
+    safestrcpy(pi.name, p->name, sizeof(pi.name));
+    for(fd = 0; fd < NOFILE; fd++){
+      if((f = p->ofile[fd]) != 0){
+        pi.fds[pi.nofile] = fd;
+        pi.fileidx[pi.nofile] = fileindex(f);
+        pi.nofile++;
+      }
+    }
+    release(&p->lock);
+    release(&wait_lock);
+
+    if(copyout(me->pagetable, dst + n * sizeof(pi), (char *)&pi, sizeof(pi)) < 0)
+      return -1;
+    n++;
+  }
+  return n;
 }
