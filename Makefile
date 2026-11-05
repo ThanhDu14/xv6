@@ -94,6 +94,9 @@ endif
 
 CFLAGS += $(XCFLAGS)
 CFLAGS += -MD
+# Ubuntu riscv64-linux-gnu-gcc 15 defaults to RVA23 (Zcb c.mul, ...) which QEMU rv64 lacks
+CFLAGS += -march=rv64gc -mabi=lp64d
+ASFLAGS += -march=rv64gc -mabi=lp64d -fno-pie
 CFLAGS += -mcmodel=medany
 # CFLAGS += -ffreestanding -fno-common -nostdlib -mno-relax
 CFLAGS += -fno-common -nostdlib
@@ -194,6 +197,7 @@ UPROGS=\
 	$U/_grind\
 	$U/_wc\
 	$U/_zombie\
+	$U/_trace\
 
 
 
