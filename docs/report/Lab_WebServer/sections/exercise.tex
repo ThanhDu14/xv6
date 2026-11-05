@@ -1,0 +1,143 @@
+\section{Các phần thực hiện}
+
+\subsection{Phần 0 -- Chuẩn bị môi trường}
+\textbf{\large Yêu cầu:} Cho hai tên miền \cmd{demo.hcmus.edu.vn} và
+\cmd{demo2.hcmus.edu.vn} phân giải về máy chủ (lab không có DNS thật).
+
+\textbf{\large Thực hiện:} Thêm vào \cmd{/etc/hosts} trên máy cá nhân (IP public
+của EC2), và trên chính EC2 trỏ hai tên miền về localhost:
+\begin{minted}{text}
+# máy cá nhân
+13.212.177.185  demo.hcmus.edu.vn demo2.hcmus.edu.vn
+# trên EC2
+127.0.0.1       demo.hcmus.edu.vn demo2.hcmus.edu.vn
+\end{minted}
+
+\subsection{Phần A -- Cài đặt và baseline}
+\textbf{\large Yêu cầu:} Cài Apache, mở tường lửa, kiểm tra dịch vụ đang chạy.
+
+\textbf{\large Thực hiện:}
+\begin{minted}{bash}
+apt update && apt install -y apache2
+a2enmod ssl proxy proxy_http proxy_balancer lbmethod_byrequests headers
+systemctl enable --now apache2
+ufw allow OpenSSH && ufw allow 'Apache Full' && ufw enable
+\end{minted}
+Ngoài ufw, trên AWS còn phải mở inbound cổng 80 và 443 trong Security Group
+của instance (Hình~\ref{fig:sg}).
+
+\textbf{\large Kết quả:}
+\shot{ss-121541.png}{0.95}{Apache đang chạy và lắng nghe cổng 80, 443}{fig:active}
+\shot{ss-121603.png}{0.38}{ufw cho phép OpenSSH và Apache Full}{fig:ufw}
+\shot{ss-121634.png}{1.0}{Inbound rules của Security Group trên AWS: 22, 80, 443}{fig:sg}
+
+\subsection{Phần B -- Website đầu tiên trên Virtual Host (demo)}
+\textbf{\large Yêu cầu:} Tạo website tĩnh \cmd{/var/www/demo} phục vụ cho
+tên miền \cmd{demo.hcmus.edu.vn}.
+
+\textbf{\large Thực hiện:}
+\begin{minted}{bash}
+mkdir -p /var/www/demo
+# tạo /var/www/demo/index.html với tiêu đề "Website DEMO 1"
+chown -R root:www-data /var/www/demo
+chmod -R 750 /var/www/demo
+a2ensite demo
+apache2ctl configtest && systemctl reload apache2
+\end{minted}
+Nội dung đầy đủ của \cmd{demo.conf} (sau khi đã thêm HTTPS, \cmd{/api},
+\cmd{/app}) ở File~\ref{lst:demo}.
+
+\textbf{\large Kết quả:}
+\shot{ss-121719.png}{0.85}{Vhost 1: \texttt{demo.hcmus.edu.vn}}{fig:demo1}
+
+\subsection{Phần C -- Virtual Host thứ hai (demo2)}
+\textbf{\large Yêu cầu:} Thêm website thứ hai trên cùng IP, Apache phân biệt
+hai site bằng header \texttt{Host:}.
+
+\textbf{\large Thực hiện:} Tạo \cmd{/var/www/demo2} tương tự Phần B, tạo
+\cmd{demo2.conf} rồi \cmd{a2ensite demo2}. Site \cmd{demo2} cũng được bổ sung
+một VirtualHost \cmd{:443} với chứng chỉ riêng.
+
+\confile{apacheconf}{demo2.conf}{/etc/apache2/sites-available/demo2.conf}{lst:demo2}
+
+\textbf{\large Kết quả:} Hai tên miền cho ra hai trang khác nhau dù cùng một IP và
+một tiến trình Apache. \cmd{apache2ctl -S} liệt kê hai namevhost trên cổng 80.
+\shot{ss-122236.png}{0.85}{Vhost 2: \texttt{demo2.hcmus.edu.vn}}{fig:demo2}
+\shot{ss-121742.png}{0.85}{\texttt{apache2ctl -S}: hai namevhost trên cổng 80, demo trên 443}{fig:vhosts}
+
+\subsection{Phần D -- Node API backend và Reverse Proxy (/api)}
+\textbf{\large Yêu cầu:} Dựng backend Node.js chỉ lắng nghe nội bộ, Apache làm
+reverse proxy cho đường dẫn \cmd{/api}.
+
+\textbf{\large Thực hiện:} Backend \cmd{/opt/api/app.js} trả JSON cho biết
+instance nào xử lý request. Backend được chạy bằng systemd dạng instantiated
+service, mỗi cổng là một instance \cmd{nodeapi@<port>}.
+
+\confile{javascript}{app.js}{/opt/api/app.js}{lst:app}
+\confile{ini}{nodeapi@.service}{/etc/systemd/system/nodeapi@.service}{lst:service}
+
+\begin{minted}{bash}
+systemctl daemon-reload
+systemctl enable --now nodeapi@3000
+\end{minted}
+Trong \cmd{demo.conf} thêm \cmd{ProxyPreserveHost}, \cmd{ProxyPass} và
+\cmd{ProxyPassReverse} cho \cmd{/api} (File~\ref{lst:demo}).
+
+\textbf{\large Kết quả:} \cmd{/api/hello} trả JSON từ \cmd{node-3000}, trong khi
+truy cập thẳng cổng 3000 từ bên ngoài thì không được: mọi request buộc phải đi
+qua Apache.
+\shot{ss-122327.png}{0.85}{\texttt{/api/hello} trả JSON từ \texttt{node-3000}}{fig:api}
+\shot{ss-122431.png}{0.42}{Từ máy ngoài không truy cập thẳng được cổng 3000}{fig:direct}
+
+\subsection{Phần E -- Load Balancer (pool 3 backend + failover)}
+\textbf{\large Yêu cầu:} Chạy 3 instance backend, cấu hình Apache chia tải
+round-robin và tự né instance bị lỗi.
+
+\textbf{\large Thực hiện:}
+\begin{minted}{bash}
+systemctl enable --now nodeapi@3001 nodeapi@3002 nodeapi@3003
+\end{minted}
+Trong \cmd{demo.conf} khai báo \cmd{balancer://appcluster} gồm 3 thành viên với
+\cmd{lbmethod=byrequests} và ánh xạ đường dẫn \cmd{/app} (File~\ref{lst:demo}).
+Thử failover bằng cách dừng \cmd{nodeapi@3002} rồi gửi lại request.
+
+\textbf{\large Kết quả:} Response xoay vòng qua 3001, 3002, 3003; khi dừng 3002,
+traffic tự chuyển sang 3001 và 3003 mà client không thấy lỗi.
+\shot{ss-122635.png}{0.6}{Bốn instance Node chỉ lắng nghe trên 127.0.0.1}{fig:ports}
+\shot{ss-114911.png}{1.0}{Load balancer xoay vòng 3 instance; khi dừng \texttt{nodeapi@3002} traffic tự chuyển sang 3001, 3003}{fig:lb}
+
+\subsection{Phần F -- SSL/TLS (HTTPS) + redirect + HSTS}
+\textbf{\large Yêu cầu:} Bật HTTPS bằng chứng chỉ tự ký, ép redirect 80 sang
+443 và bật HSTS.
+
+\textbf{\large Thực hiện:}
+\begin{minted}{bash}
+openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
+  -keyout /etc/ssl/private/demo.key -out /etc/ssl/certs/demo.crt \
+  -subj "/C=VN/ST=HCM/L=HCMC/O=HCMUS/CN=demo.hcmus.edu.vn"
+\end{minted}
+VirtualHost \cmd{:80} chỉ còn nhiệm vụ redirect 301 sang HTTPS; VirtualHost
+\cmd{:443} phục vụ nội dung tĩnh, \cmd{/api}, \cmd{/app} và gửi header HSTS.
+Đây là nội dung cuối cùng của \cmd{demo.conf}:
+
+\confile{apacheconf}{demo.conf}{/etc/apache2/sites-available/demo.conf}{lst:demo}
+
+\textbf{\large Kết quả:} HTTP trả \cmd{301 Moved Permanently} về \cmd{https://};
+HTTPS trả \cmd{200 OK} kèm \cmd{Strict-Transport-Security}.
+\shot{ss-122751.png}{0.48}{HTTP bị redirect 301 sang HTTPS; HTTPS trả 200 kèm \texttt{Strict-Transport-Security}}{fig:https}
+
+\subsection{Phần G -- Tường lửa và AppArmor: rà soát và làm cứng}
+\textbf{\large Yêu cầu:} Chỉ mở đúng cổng cần thiết, giữ cơ chế kiểm soát truy
+cập bắt buộc hoạt động, ẩn version Apache và thêm header bảo mật.
+
+\textbf{\large Thực hiện:} Tường lửa chỉ mở 22, 80, 443 (Hình~\ref{fig:ufw},
+\ref{fig:sg}). AppArmor giữ nguyên chế độ enforce. Header bảo mật đặt trong
+\cmd{hardening.conf} (bật bằng \cmd{a2enconf hardening}); \cmd{ServerTokens},
+\cmd{ServerSignature}, \cmd{TraceEnable} đặt trong \cmd{security.conf}.
+
+\confile{apacheconf}{hardening.conf}{/etc/apache2/conf-available/hardening.conf}{lst:hardening}
+\confile{apacheconf}{security.conf}{/etc/apache2/conf-available/security.conf (các dòng có hiệu lực)}{lst:security}
+
+\textbf{\large Kết quả:} Header \texttt{Server} chỉ còn \texttt{Apache} (đã ẩn
+version), ba header bảo mật xuất hiện.
+\shot{ss-122833.png}{0.8}{AppArmor đang hoạt động; header \texttt{Server} đã ẩn version và có 3 header bảo mật}{fig:harden}

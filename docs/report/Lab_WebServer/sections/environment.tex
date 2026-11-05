@@ -1,0 +1,70 @@
+\section{Môi trường thực hiện}
+
+\subsection{Thông tin hệ thống}
+Bài thực hành được thực hiện trên một máy ảo \textbf{AWS EC2} (vùng
+\texttt{ap-southeast-1}, Singapore) chạy \textbf{Ubuntu}. Các thành phần chính:
+
+\begin{table}[H]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{>{\raggedright}p{4.2cm}X}
+    \toprule
+    \textbf{Thành phần} & \textbf{Sử dụng} \\
+    \midrule
+    Web server & \cmd{apache2}, chạy dưới user \cmd{www-data} \\
+    Cấu hình virtual host & \cmd{/etc/apache2/sites-available/*.conf}, bật bằng \cmd{a2ensite} \\
+    Kiểm tra cấu hình & \cmd{apache2ctl configtest}, \cmd{apache2ctl -S} \\
+    Module & \cmd{ssl proxy proxy\_http proxy\_balancer lbmethod\_byrequests headers} (bật bằng \cmd{a2enmod}) \\
+    Chứng chỉ TLS & \cmd{/etc/ssl/certs}, \cmd{/etc/ssl/private} \\
+    Backend & Node.js, chạy bằng systemd \\
+    Tường lửa & ufw (trong OS) và AWS Security Group (ngoài máy ảo) \\
+    Kiểm soát truy cập bắt buộc & AppArmor \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Môi trường triển khai}
+\end{table}
+
+\subsection{Sơ đồ hệ thống}
+Trên AWS, mỗi request từ trình duyệt phải đi qua \textbf{hai lớp tường lửa}:
+Security Group của AWS (ngoài máy ảo) rồi mới tới ufw (trong hệ điều hành).
+Điểm này là nguyên nhân của sự cố ở Mục~\ref{sec:loi}.
+
+\begin{figure}[H]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    font=\small,
+    box/.style={draw, rounded corners=2pt, align=center, minimum height=0.9cm, fill=white},
+    fw/.style={box, fill=orange!15, minimum width=1.9cm, minimum height=2.6cm},
+    be/.style={box, fill=blue!8, minimum width=2.6cm, minimum height=0.6cm},
+    arr/.style={-{Stealth[length=2mm]}, thick},
+    every node/.append style={execute at begin node=\setlength{\baselineskip}{1.1em}},
+  ]
+  \node[box, minimum width=2cm, minimum height=2.6cm] (client) {Trình duyệt\\(máy cá nhân)};
+  \node[fw, right=0.5cm of client] (sg) {AWS\\Security\\Group\\[2pt]\scriptsize 22, 80, 443};
+  \node[fw, right=0.5cm of sg] (ufw) {ufw\\[2pt]\scriptsize OpenSSH\\\scriptsize Apache Full};
+  \node[box, right=0.5cm of ufw, minimum width=3.6cm, minimum height=2.6cm, fill=green!8] (apache)
+      {\textbf{Apache2}\\[3pt]:80 $\xrightarrow{301}$ :443 (TLS)\\[3pt]
+       \scriptsize vhost \texttt{demo} $\to$ /var/www/demo\\
+       \scriptsize vhost \texttt{demo2} $\to$ /var/www/demo2};
+  \node[be, right=0.8cm of apache, yshift=0.9cm] (n0) {\scriptsize node 127.0.0.1:3000};
+  \node[be, below=0.25cm of n0] (n1) {\scriptsize node 127.0.0.1:3001};
+  \node[be, below=0.05cm of n1] (n2) {\scriptsize node 127.0.0.1:3002};
+  \node[be, below=0.05cm of n2] (n3) {\scriptsize node 127.0.0.1:3003};
+
+  \draw[arr] (client) -- (sg);
+  \draw[arr] (sg) -- (ufw);
+  \draw[arr] (ufw) -- (apache);
+  \draw[arr] (apache.east) ++(0,0.9) -- node[above, font=\scriptsize] {/api} (n0.west);
+  \draw[arr] (apache.east) ++(0,-0.3) -- node[above, font=\scriptsize] {/app} (n2.west);
+
+  \begin{scope}[on background layer]
+    \node[draw, dashed, rounded corners, inner sep=6pt, fit=(ufw)(apache)(n0)(n3),
+          label={[font=\scriptsize]above right:EC2 Ubuntu (ip-172-31-44-12)}] {};
+    \node[draw, dashed, gray, rounded corners, inner sep=4pt, fit=(n1)(n3),
+          label={[font=\scriptsize, gray]below:balancer://appcluster}] {};
+  \end{scope}
+\end{tikzpicture}}
+\caption{Kiến trúc triển khai và hai lớp tường lửa trên AWS}
+\label{fig:arch}
+\end{figure}

@@ -1,0 +1,24 @@
+\section{Bảng kiểm tra tổng}
+
+\begin{table}[H]
+  \centering
+  \small
+  \renewcommand{\arraystretch}{1.2}
+  \begin{tabularx}{\textwidth}{c>{\raggedright}p{2.4cm}>{\raggedright}X>{\raggedright}p{3.2cm}>{\centering}p{1.3cm}c}
+    \toprule
+    \textbf{\#} & \textbf{Hạng mục} & \textbf{Lệnh kiểm chứng} & \textbf{Kết quả} & \textbf{Hình} & \\
+    \midrule
+    1  & Apache chạy      & \cmd{systemctl is-active apache2} & active, LISTEN :80/:443 & \ref{fig:active} & \ok \\
+    2  & Firewall mở      & \cmd{ufw status} + Security Group & Apache Full; SG 22/80/443 & \ref{fig:ufw}, \ref{fig:sg} & \ok \\
+    3  & Vhost 1          & trình duyệt \cmd{demo.hcmus.edu.vn} & trang DEMO 1 & \ref{fig:demo1} & \ok \\
+    4  & Vhost 2          & trình duyệt \cmd{demo2...}; \cmd{apache2ctl -S} & trang DEMO 2; 2 namevhost & \ref{fig:demo2}, \ref{fig:vhosts} & \ok \\
+    5  & Reverse proxy    & \cmd{/api/hello} & JSON node-3000 & \ref{fig:api} & \ok \\
+    6  & Load balancer    & lặp \cmd{curl .../app/} & xoay vòng 3001/2/3 & \ref{fig:lb} & \ok \\
+    7  & Failover         & dừng \cmd{nodeapi@3002}, lặp curl & chỉ còn 3001, 3003, không lỗi & \ref{fig:lb} & \ok \\
+    8  & Redirect HTTPS   & \cmd{curl -I http://demo...} & 301 $\to$ https, có HSTS & \ref{fig:https} & \ok \\
+    9  & AppArmor         & \cmd{aa-status} & module loaded, enforce & \ref{fig:harden} & \ok \\
+    10 & Hardening        & \cmd{curl -kI https://...} & \texttt{Server: Apache} + 3 header & \ref{fig:harden} & \ok \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Kết quả kiểm tra tổng}
+\end{table}
