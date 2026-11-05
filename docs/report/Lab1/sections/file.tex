@@ -1,0 +1,198 @@
+\section{Tìm hiểu về File}
+
+\subsection{Field \texttt{ofile[]} của \texttt{struct proc} và \texttt{file[]} của \texttt{struct ftable}}
+\label{sec:ofile-ftable}
+
+File descriptor (fd) là một số nguyên nhỏ mà process dùng để chỉ tới một đối
+tượng có thể đọc/ghi: file thường, thư mục, thiết bị (console) hoặc pipe.
+Chương trình user chỉ thấy con số này; bên trong kernel, mỗi fd được giải mã
+qua ba tầng (Hình~\ref{fig:fd-layers}).
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  cell/.style={draw, minimum width=1.0cm, minimum height=0.55cm, font=\scriptsize\ttfamily},
+  ent/.style={draw, minimum width=3.6cm, minimum height=0.55cm, font=\scriptsize\ttfamily, align=left, fill=blue!5},
+  ino/.style={draw, rounded corners, minimum width=2.4cm, minimum height=0.55cm, font=\scriptsize\ttfamily, fill=green!8},
+  ar/.style={-{Stealth[length=2mm]}, thick},
+  ttl/.style={font=\small\bfseries}]
+  % process A
+  \node[ttl] at (0.5,0.7) {Process A};
+  \foreach \i/\v in {0/fd 0,1/fd 1,2/fd 2,3/fd 3,4/fd 4}
+    \node[cell] (a\i) at (0,-\i*0.55) {\v};
+  \foreach \i in {0,...,4}
+    \node[cell, right=0cm of a\i] (pa\i) {};
+  % process B
+  \node[ttl] at (0.5,-3.3) {Process B};
+  \foreach \i/\v in {0/fd 0,1/fd 1,2/fd 2,3/fd 3}
+    \node[cell] (b\i) at (0,-4.0-\i*0.55) {\v};
+  \foreach \i in {0,...,3}
+    \node[cell, right=0cm of b\i] (pb\i) {};
+  % ftable
+  \node[ttl] at (5.6,0.7) {ftable.file[NFILE]};
+  \node[ent] (f0) at (5.6,-0.3)  {[0] DEVICE console\\\ \ \ \ ref=6 rw};
+  \node[ent] (f1) at (5.6,-1.6)  {[1] INODE README\\\ \ \ \ ref=2 r- off=512};
+  \node[ent] (f2) at (5.6,-2.9)  {[2] INODE README\\\ \ \ \ ref=1 r- off=0};
+  \node[ent] (f3) at (5.6,-4.2)  {[3] (ref=0, trống)};
+  % inodes
+  \node[ttl] at (10.2,0.7) {inode (itable)};
+  \node[ino] (i23) at (10.2,-0.3) {inode 23 (dev)};
+  \node[ino] (i2)  at (10.2,-2.2) {inode 2 (file)};
+
+  \draw[ar] (pa0.center) -- (f0.west);
+  \draw[ar] (pa1.center) -- (f0.west);
+  \draw[ar] (pa2.center) -- (f0.west);
+  \draw[ar] (pa3.center) -- (f1.west);
+  \draw[ar] (pa4.center) -- (f2.west);
+  \draw[ar] (pb0.center) -- (f0.west);
+  \draw[ar] (pb1.center) -- (f0.west);
+  \draw[ar] (pb2.center) -- (f0.west);
+  \draw[ar] (pb3.center) -- (f1.west);
+  \draw[ar] (f0.east) -- (i23.west);
+  \draw[ar] (f1.east) -- (i2.west);
+  \draw[ar] (f2.east) -- (i2.west);
+
+  \node[font=\scriptsize, align=center] at (0.5,-6.5) {p->ofile[NOFILE]\\(riêng từng process)};
+  \node[font=\scriptsize, align=center] at (5.6,-6.5) {struct file\\(dùng chung toàn hệ thống)};
+  \node[font=\scriptsize, align=center] at (10.2,-6.5) {struct inode\\(file thật)};
+\end{tikzpicture}
+\caption{Ba tầng giải mã file descriptor. B là con của A, được tạo bằng
+\texttt{fork} sau khi A mở README lần thứ nhất (fd 3) nên dùng chung ô [1]; sau
+đó A mở README lần nữa (fd 4) và nhận ô [2] riêng.}
+\label{fig:fd-layers}
+\end{figure}
+
+\paragraph{\texttt{p->ofile[NOFILE]}.}
+Mảng 16 con trỏ \cmd{struct file*} trong \cmd{struct proc}; \textbf{fd chính
+là chỉ số} trong mảng này. Ô bằng 0 nghĩa là fd đó chưa dùng. Mảng là riêng
+của từng process, nên fd 3 của process A và fd 3 của process B có thể trỏ tới
+hai file khác nhau. Theo quy ước, fd 0, 1, 2 là stdin, stdout, stderr. Field
+này thuộc nhóm ``riêng tư'' của \cmd{struct proc}, chỉ chính process đó
+sửa (trong \cmd{open}, \cmd{dup}, \cmd{close}, \cmd{fork}, \cmd{exit}) nên
+không cần \cmd{p->lock}.
+
+\paragraph{\texttt{ftable.file[NFILE]}.}
+Bảng file đang mở của toàn hệ thống (\cmd{kernel/file.c}), gồm 100 phần tử
+\cmd{struct file} và một spinlock \cmd{ftable.lock}. Mỗi phần tử ứng với
+\emph{một lần mở} (một lần gọi \cmd{open} hoặc \cmd{pipe}):
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{>{\ttfamily}l X}
+\toprule
+\textrm{\textbf{Field}} & \textbf{Ý nghĩa} \\
+\midrule
+type & \cmd{FD\_NONE} (ô trống), \cmd{FD\_PIPE}, \cmd{FD\_INODE} (file, thư mục),
+       \cmd{FD\_DEVICE} (thiết bị như console). \\
+ref & Số con trỏ đang trỏ vào ô này (từ \cmd{ofile[]} của mọi process).
+      \cmd{ref == 0} nghĩa là ô trống. Được bảo vệ bởi \cmd{ftable.lock}. \\
+readable, writable & Mode mở: được đọc / được ghi hay không. \\
+pipe & Con trỏ tới \cmd{struct pipe} nếu là pipe. \\
+ip & Con trỏ tới inode nếu là file, thư mục hoặc thiết bị. \\
+off & Vị trí đọc/ghi hiện tại (chỉ với \cmd{FD\_INODE}). \\
+major & Số hiệu thiết bị (chỉ với \cmd{FD\_DEVICE}), dùng tra bảng \cmd{devsw[]}. \\
+\bottomrule
+\end{tabularx}
+\caption{Các field của \texttt{struct file}}
+\end{table}
+
+Các hàm quản lý bảng:
+\begin{itemize}
+  \item \cmd{filealloc()}: dưới \cmd{ftable.lock}, tìm ô có \cmd{ref == 0},
+        đặt \cmd{ref = 1} và trả về ô đó.
+  \item \cmd{filedup(f)}: tăng \cmd{f->ref}.
+  \item \cmd{fileclose(f)}: giảm \cmd{f->ref}; khi về 0 thì đặt
+        \cmd{type = FD\_NONE} và giải phóng tài nguyên bên dưới
+        (\cmd{pipeclose} hoặc \cmd{iput}).
+\end{itemize}
+
+\paragraph{Vì sao cần tầng \texttt{ftable} ở giữa.}
+Nếu \cmd{ofile[]} trỏ thẳng vào inode thì không có chỗ lưu offset riêng cho
+từng lần mở. Tầng \cmd{struct file} cho phép offset vừa được \emph{chia sẻ}
+(giữa các fd tạo bởi \cmd{dup} hoặc \cmd{fork}) vừa được \emph{tách biệt}
+(giữa hai lần \cmd{open} khác nhau trên cùng một file).
+
+\subsection{Trace system call \texttt{open}}
+\label{sec:trace-open}
+
+\begin{enumerate}
+  \item \textbf{User space:} \cmd{open(path, omode)} nạp \cmd{SYS\_open} vào
+        \cmd{a7}, gọi \cmd{ecall}. Kernel đi qua \cmd{uservec}
+        $\to$ \cmd{usertrap()} $\to$ \cmd{syscall()} $\to$ \cmd{sys\_open()}
+        (\cmd{kernel/sysfile.c}), giống như \cmd{fork} ở mục~\ref{sec:trace-fork}.
+  \item \textbf{Lấy tham số:} \cmd{argint(1, \&omode)} lấy mode;
+        \cmd{argstr(0, path, MAXPATH)} chép chuỗi đường dẫn từ bộ nhớ user vào
+        kernel (qua \cmd{copyinstr}, dùng page table của process).
+  \item \textbf{Bắt đầu transaction:} \cmd{begin\_op()}, vì \cmd{open} có thể
+        ghi lên đĩa (tạo file mới).
+  \item \textbf{Tìm hoặc tạo inode:}
+        \begin{itemize}
+          \item Có \cmd{O\_CREATE}: \cmd{create(path, T\_FILE, 0, 0)} tìm thư
+                mục cha, nếu file chưa có thì \cmd{ialloc} một inode mới và
+                \cmd{dirlink} thêm entry vào thư mục. Trả về inode đã khóa.
+          \item Không có \cmd{O\_CREATE}: \cmd{namei(path)} duyệt đường dẫn
+                từng thành phần (\cmd{dirlookup}) để lấy inode, rồi
+                \cmd{ilock(ip)} (đọc inode từ đĩa nếu chưa có trong bộ nhớ).
+                Nếu là thư mục mà mở để ghi thì trả về lỗi.
+        \end{itemize}
+  \item \textbf{Kiểm tra thiết bị:} nếu \cmd{T\_DEVICE} thì \cmd{major} phải
+        hợp lệ ($0 \le \text{major} < \text{NDEV}$).
+  \item \textbf{Cấp \texttt{struct file}:} \cmd{filealloc()} lấy một ô trống
+        trong \cmd{ftable} (\cmd{ref = 1}). Nếu bảng đầy (100 ô), trả về $-1$.
+  \item \textbf{Cấp fd:} \cmd{fdalloc(f)} duyệt \cmd{p->ofile[]} từ 0, gán
+        \cmd{f} vào \textbf{ô trống có chỉ số nhỏ nhất} và trả về chỉ số đó.
+        Nếu process đã dùng đủ 16 fd, \cmd{fileclose(f)} trả lại ô
+        \cmd{ftable} và \cmd{open} trả về $-1$.
+  \item \textbf{Điền \texttt{struct file}:} \cmd{type} là \cmd{FD\_DEVICE}
+        (kèm \cmd{major}) hoặc \cmd{FD\_INODE} (kèm \cmd{off = 0});
+        \cmd{ip = ip}; \cmd{readable = !(omode \& O\_WRONLY)};
+        \cmd{writable = (omode \& O\_WRONLY) || (omode \& O\_RDWR)}.
+  \item \textbf{\texttt{O\_TRUNC}:} nếu có và là file thường thì
+        \cmd{itrunc(ip)} xóa nội dung.
+  \item \textbf{Kết thúc:} \cmd{iunlock(ip)} (vẫn giữ tham chiếu inode qua
+        \cmd{f->ip}), \cmd{end\_op()}, trả về \cmd{fd}.
+\end{enumerate}
+
+Bước 7 (chọn fd nhỏ nhất) là cơ sở của chuyển hướng I/O trong shell: với lệnh
+\cmd{sysinfo -f > out}, shell \cmd{close(1)} rồi \cmd{open("out", ...)}, nên
+file \cmd{out} nhận đúng fd 1 (kết quả ở Hình~\ref{fig:demo-redirect}).
+
+\subsection{So sánh cách dùng file descriptor trong \texttt{open()}, \texttt{dup()}, \texttt{fork()}}
+\label{sec:compare-fd}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{3.0cm} X X X}
+\toprule
+ & \cmd{open(path, mode)} & \cmd{dup(fd)} & \cmd{fork()} \\
+\midrule
+fd mới & 1 fd, nhỏ nhất còn trống & 1 fd, nhỏ nhất còn trống
+       & Process con có bản sao toàn bộ \cmd{ofile[]}, cùng số fd \\
+\cmd{struct file} & \textbf{Cấp ô mới} (\cmd{filealloc}) & Dùng lại ô cũ
+       & Dùng lại các ô của cha \\
+\cmd{ref} & Ô mới có \cmd{ref = 1} & \cmd{ref + 1}
+          & Mỗi ô đang mở: \cmd{ref + 1} (\cmd{filedup}) \\
+Offset & Riêng, bắt đầu từ 0 & Dùng chung với fd gốc & Dùng chung giữa cha và con \\
+Mode & Theo tham số \cmd{mode} & Giống fd gốc & Giống của cha \\
+Phạm vi & Trong process gọi & Trong process gọi & Giữa hai process \\
+Ứng dụng & Mở file & Chuyển hướng I/O, ví dụ \cmd{init} tạo fd 1, 2 từ fd 0
+         & Shell chia sẻ console và pipe cho lệnh con \\
+\bottomrule
+\end{tabularx}
+\caption{So sánh file descriptor trong \texttt{open}, \texttt{dup}, \texttt{fork}}
+\end{table}
+
+Tóm lại, chỉ \cmd{open} (và \cmd{pipe}) tạo ra một \cmd{struct file} mới.
+\cmd{dup} và \cmd{fork} chỉ tạo thêm con trỏ tới \cmd{struct file} đã có, nên
+các fd đó \emph{dùng chung offset}: ví dụ cha và con cùng ghi vào một file sau
+\cmd{fork} thì dữ liệu được nối tiếp chứ không ghi đè lên nhau. Ngược lại, hai
+lần \cmd{open} cùng một file cho hai \cmd{struct file} độc lập, chỉ dùng chung
+inode.
+
+Các tính chất này được kiểm chứng bằng \cmd{sysinfo} trong test
+\cmd{test\_openclose}, \cmd{test\_dup}, \cmd{test\_fork}
+(mục~\ref{sec:testing}): hai lần \cmd{open} cho hai \cmd{idx} khác nhau cùng
+\cmd{inum}; \cmd{dup} cho cùng \cmd{idx} với \cmd{ref = 3} và offset chung;
+sau \cmd{fork} các fd của con có cùng \cmd{idx} với cha và \cmd{ref} tăng 1.

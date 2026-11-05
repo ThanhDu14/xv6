@@ -1,0 +1,329 @@
+\section{Cài đặt system call \texttt{sysinfo}}
+\label{sec:sysinfo}
+
+\subsection{Yêu cầu và ý tưởng}
+
+\cmd{sysinfo(struct sysinfo *info)} thu thập thông tin hệ thống đang chạy:
+\begin{itemize}
+  \item Các file đang mở trong toàn hệ thống, tức các ô \cmd{ftable.file[]}
+        có \cmd{ref > 0}: số lượng và với mỗi file là type, mode, reference count,
+        danh sách process tham chiếu.
+  \item Các process có \cmd{state != UNUSED} trong \cmd{proc[]}: số lượng và với
+        mỗi process là pid, state, pid của cha, số lần được lập lịch, danh sách
+        file đang mở.
+\end{itemize}
+
+Danh sách ``process tham chiếu tới file'' được tính ngược: process nào có một
+ô \cmd{ofile[]} trỏ tới \cmd{struct file} đó. Để người dùng đối chiếu được hai
+danh sách, mỗi file mang chỉ số \cmd{idx} trong \cmd{ftable}, và mỗi fd của
+process mang chỉ số \cmd{fileidx} của ô nó trỏ tới.
+
+\subsection{Cấu trúc dữ liệu (\texttt{kernel/sysinfo.h})}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{>{\ttfamily}l X}
+\toprule
+\multicolumn{2}{l}{\cmd{struct fileinfo} -- một file đang mở} \\
+\midrule
+idx & Vị trí trong \cmd{ftable.file[]} \\
+type, readable, writable, ref & Lấy trực tiếp từ \cmd{struct file} \\
+inum, itype, major, off & Số inode, loại inode (file/dir/device), thiết bị,
+  offset; $-1$ nếu không áp dụng (ví dụ pipe) \\
+nfd & Tổng số fd (của mọi process) trỏ vào file này \\
+npid, pids[NPROC] & Danh sách pid các process tham chiếu (mỗi pid một lần) \\
+\midrule
+\multicolumn{2}{l}{\cmd{struct procinfo} -- một process khác \cmd{UNUSED}} \\
+\midrule
+pid, state, ppid, name & Định danh, trạng thái, pid của cha (0 nếu không có), tên \\
+nsched & Số lần được scheduler chọn chạy (field mới trong \cmd{struct proc}) \\
+nofile, fds[], fileidx[] & Các fd đang mở và chỉ số ô \cmd{ftable} tương ứng \\
+\midrule
+\multicolumn{2}{l}{\cmd{struct sysinfo}} \\
+\midrule
+nfile, files[NFILE] & Số file đang mở và mảng \cmd{fileinfo} \\
+nproc, procs[NPROC] & Số process và mảng \cmd{procinfo} \\
+\bottomrule
+\end{tabularx}
+\caption{Các cấu trúc trả về cho user}
+\end{table}
+
+\subsection{Các thay đổi trong mã nguồn}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{>{\ttfamily}l X}
+\toprule
+\textrm{\textbf{File}} & \textbf{Thay đổi} \\
+\midrule
+kernel/sysinfo.h & (mới) Định nghĩa \cmd{fileinfo}, \cmd{procinfo}, \cmd{sysinfo}. \\
+kernel/proc.h & Thêm field \cmd{nsched} vào \cmd{struct proc}. \\
+kernel/proc.c & \cmd{allocproc}: \cmd{nsched = 0}. \cmd{scheduler}: \cmd{nsched++}
+  trước \cmd{swtch}. Thêm \cmd{procfilerefs()} và \cmd{procsysinfo()}. \\
+kernel/file.c & Thêm \cmd{fileindex()} và \cmd{filesysinfo()}. \\
+kernel/sysproc.c & Thêm \cmd{sys\_sysinfo()}. \\
+kernel/syscall.h, syscall.c & \cmd{SYS\_sysinfo = 23}; thêm vào bảng \cmd{syscalls[]}
+  và \cmd{syscallnames[]} (để lệnh \cmd{trace} của Lab0 in được tên). \\
+kernel/defs.h & Prototype của 4 hàm mới. \\
+user/user.h, user/usys.pl & Khai báo \cmd{struct sysinfo;},
+  \cmd{int sysinfo(struct sysinfo *);} và stub \cmd{entry("sysinfo")}. \\
+user/sysinfotest.c & (mới) Chương trình test. \\
+user/sysinfo.c & (mới) Lệnh in trạng thái hệ thống. \\
+Makefile & Thêm \cmd{\_sysinfotest}, \cmd{\_sysinfo} vào \cmd{UPROGS}. \\
+\bottomrule
+\end{tabularx}
+\caption{Danh sách file thay đổi}
+\end{table}
+
+\subsection{Luồng xử lý trong kernel}
+
+\begin{enumerate}
+  \item \cmd{sys\_sysinfo()} lấy địa chỉ user \cmd{addr} bằng \cmd{argaddr(0)}.
+  \item Gọi \cmd{filesysinfo(addr + offsetof(files))}. Với mỗi ô của
+        \cmd{ftable.file[]}:
+        lấy \cmd{ftable.lock}; bỏ qua nếu \cmd{ref == 0}; chép type, mode, ref,
+        thông tin inode vào biến cục bộ \cmd{fileinfo}; gọi
+        \cmd{procfilerefs(f)} để duyệt \cmd{proc[]} và ghi lại pid các process
+        có \cmd{ofile[]} trỏ tới \cmd{f}; nhả khóa; \cmd{copyout} phần tử đó
+        vào \cmd{files[n]} của user.
+  \item Gọi \cmd{procsysinfo(addr + offsetof(procs))}. Với mỗi \cmd{p} trong
+        \cmd{proc[]}: lấy \cmd{wait\_lock} rồi \cmd{p->lock}; bỏ qua nếu
+        \cmd{UNUSED}; chép pid, state, \cmd{parent->pid}, nsched, name và danh
+        sách fd (kèm \cmd{fileindex()} của từng file) vào biến cục bộ
+        \cmd{procinfo}; nhả khóa; \cmd{copyout} vào \cmd{procs[n]}.
+  \item \cmd{copyout} hai giá trị \cmd{nfile}, \cmd{nproc} vào đầu struct và
+        trả về 0. Nếu bất kỳ \cmd{copyout} nào thất bại (địa chỉ không hợp lệ,
+        không ghi được hoặc vượt \cmd{MAXVA}) thì trả về $-1$.
+\end{enumerate}
+
+\subsection{Các vấn đề kỹ thuật và cách giải quyết}
+
+\paragraph{Struct quá lớn so với stack.}
+\cmd{struct sysinfo} có kích thước khoảng 40\,KB
+($100 \times 300$\,B $+ 64 \times 164$\,B), trong khi kernel stack chỉ có 4\,KB.
+Vì vậy kernel không dựng toàn bộ struct rồi \cmd{copyout} một lần, mà chỉ giữ
+\emph{một} \cmd{fileinfo} hoặc \cmd{procinfo} trên stack và \cmd{copyout}
+thẳng vào đúng vị trí trong struct của user
+(\cmd{addr + offsetof(files) + n * sizeof(fileinfo)}). Ở phía user, user
+stack chỉ có 8\,KB nên chương trình test khai báo struct là biến
+\cmd{static} toàn cục.
+
+\paragraph{Đồng bộ trên nhiều CPU.}
+xv6 chạy trên 3 CPU, nên trong lúc \cmd{sysinfo} đọc, process khác có thể đang
+\cmd{open}, \cmd{close}, \cmd{fork} hay \cmd{exit}. Nhóm dùng các khóa sẵn có
+theo đúng vai trò của chúng:
+\begin{itemize}
+  \item \cmd{ftable.lock} được giữ trong suốt lúc đọc một ô \emph{và} dò
+        \cmd{ofile[]}, nên \cmd{ref} và danh sách pid luôn nhất quán
+        (\cmd{nfd} không bao giờ vượt \cmd{ref}).
+  \item \cmd{p->lock} bảo vệ \cmd{state}, \cmd{pid}; \cmd{wait\_lock} bảo vệ
+        \cmd{parent}.
+  \item Thứ tự khóa: phần file là \cmd{ftable.lock} $\to$ \cmd{p->lock}; trong
+        xv6 không có chỗ nào giữ \cmd{p->lock} rồi mới lấy \cmd{ftable.lock}
+        (\cmd{exit} đóng file trước khi lấy \cmd{p->lock}), nên không gây
+        deadlock. Phần process là \cmd{wait\_lock} $\to$ \cmd{p->lock}, cùng
+        thứ tự với \cmd{wait()} và \cmd{exit()}.
+  \item Mọi khóa được nhả trước khi \cmd{copyout}.
+\end{itemize}
+
+\paragraph{Đếm số lần lập lịch.}
+\cmd{nsched} được tăng trong \cmd{scheduler()} ngay trước \cmd{swtch} vào
+process, là nơi duy nhất một process được cấp CPU, và lúc đó đang giữ
+\cmd{p->lock} (chi tiết ở mục~\ref{sec:sched}).
+
+\subsection{Kiểm thử}
+\label{sec:testing}
+
+\cmd{user/sysinfotest.c} gọi \cmd{sysinfo()} trước và sau mỗi thao tác rồi so
+sánh hai kết quả. Mỗi lần gọi còn được kiểm tra các bất biến chung: \cmd{ref > 0},
+\cmd{nfd} $\le$ \cmd{ref}, process \cmd{ZOMBIE} không giữ file, mọi
+\cmd{fileidx} của process đều có trong danh sách file và file đó liệt kê
+ngược lại pid của process.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{>{\ttfamily}l X}
+\toprule
+\textrm{\textbf{Test}} & \textbf{Kịch bản và kết quả mong đợi} \\
+\midrule
+basic & Thấy \cmd{init} (pid 1, ppid 0, SLEEPING), \cmd{sh} là cha của test,
+  test ở trạng thái RUNNING; fd 0/1/2 cùng trỏ một file console
+  (\cmd{FD\_DEVICE}, major 1, mode \cmd{rw}). \\
+bad addresses & Địa chỉ 0 (trang text chỉ đọc), địa chỉ vượt \cmd{MAXVA},
+  struct tràn qua cuối heap đều trả về $-1$; gọi đúng sau đó vẫn thành công. \\
+open / close & \cmd{nfile} tăng/giảm 1; mode đúng với \cmd{O\_RDONLY},
+  \cmd{O\_WRONLY}, \cmd{O\_RDWR}; mở thư mục có \cmd{itype} dir; offset là 10
+  sau khi ghi 10 byte; hai lần \cmd{open} cùng file cho hai ô khác nhau cùng inode. \\
+dup & Không tạo ô mới; 3 fd cùng \cmd{idx}, \cmd{ref = nfd = 3}; offset dùng
+  chung; \cmd{close} giảm \cmd{ref}. \\
+pipe & \cmd{nfile} tăng 2; một đầu chỉ đọc, một đầu chỉ ghi; không có inode. \\
+fork / exit / wait & Con có \cmd{ppid} đúng, SLEEPING khi chờ pipe, cùng
+  \cmd{idx} với cha, \cmd{ref} tăng (console tăng 3); con exit nhưng chưa
+  wait thì là ZOMBIE, không còn file, \cmd{ref} giảm; sau \cmd{wait} con biến mất. \\
+many processes & 10 process con: \cmd{nproc} tăng 10; đầu đọc pipe có
+  \cmd{ref = npid = 11}; đầu ghi chỉ cha giữ. \\
+scheduling counter & \cmd{nsched} tăng ít nhất 5 sau 5 lần \cmd{sleep(1)};
+  process con mới có \cmd{nsched} nhỏ. \\
+fd limit & Mở tới khi lỗi: \cmd{nofile} đúng bằng \cmd{NOFILE} = 16. \\
+ftable full & 12 process con mở file tới khi lỗi: \cmd{nfile} đúng bằng
+  \cmd{NFILE} = 100; sau khi con thoát, các ô được giải phóng. \\
+\bottomrule
+\end{tabularx}
+\caption{Các nhóm test trong \texttt{sysinfotest}}
+\end{table}
+
+Kết quả: tất cả test đều đạt, chạy hai lần liên tiếp trong cùng một lần khởi
+động vẫn đạt (không rò rỉ file hay process). \cmd{usertests -q} của xv6 cũng
+đạt toàn bộ, cho thấy các thay đổi không ảnh hưởng tới phần còn lại của kernel.
+
+\begin{figure}[H]
+\begin{minted}{text}
+$ sysinfotest
+test basic:
+  open files: 1
+    idx type   mode ref inum itype off  pids
+    0   device rw   9   23   dev   0    1 2 3
+  processes: 3
+    pid ppid state  nsched name        fd->ftable
+    1   0    sleep  13     init        0->0 1->0 2->0
+    2   1    sleep  12     sh          0->0 1->0 2->0
+    3   2    run    23     sysinfotest 0->0 1->0 2->0
+  OK
+test bad addresses:
+  OK
+test open / close / modes:
+  OK
+test dup:
+  OK
+test pipe:
+  OK
+test fork / exit / wait:
+  ...
+  OK
+test many processes:
+  OK
+test scheduling counter:
+  nsched 68 -> 73
+  OK
+test per-process fd limit (NOFILE):
+  OK
+test system-wide file table full (NFILE):
+  nfile=100 (NFILE=100)
+  OK
+sysinfotest: ALL TESTS PASSED
+\end{minted}
+\caption{Kết quả chạy \texttt{sysinfotest} trên QEMU}
+\label{fig:test-result}
+\end{figure}
+
+\subsection{Chạy với chương trình thật}
+\label{sec:demo}
+
+Lệnh \cmd{sysinfo [-f | -p]} (\cmd{user/sysinfo.c}) gọi system call và in bảng
+file (\cmd{-f}), bảng process (\cmd{-p}) hoặc cả hai. Kết hợp với shell, lệnh
+này cho thấy trực quan các khái niệm ở phần tìm hiểu.
+
+\paragraph{Pipeline.}
+Với \cmd{cat README | grep the | sysinfo} (Hình~\ref{fig:demo-pipe}), shell tạo
+hai pipe (ô 1--2 và 3--4). stdout của \cmd{cat} (fd 1) trỏ vào ô 2 (đầu ghi
+pipe thứ nhất), stdin của \cmd{grep} trỏ vào ô 1 (đầu đọc), stdout của
+\cmd{grep} trỏ vào ô 4, stdin của \cmd{sysinfo} trỏ vào ô 3. \cmd{cat} mở
+README ở fd 3 (ô 5, đã đọc tới offset 2048). Console (ô 0) có
+\cmd{ref = 16} vì được mọi process kế thừa qua \cmd{fork}. Các process
+\cmd{sh} (pid 28, 30) là các bước fork trung gian của shell.
+
+\begin{figure}[H]
+\begin{minted}{text}
+$ cat README | grep the | sysinfo
+OPEN FILES: 6
+IDX  TYPE    MODE  REF  INUM  ITYPE  OFF   PIDS
+0    device  rw    16   23    dev    0     1 2 28 29 30 31 32
+1    pipe    r-    2    -     -      -     30 31
+2    pipe    -w    1    -     -      -     29
+3    pipe    r-    1    -     -      -     32
+4    pipe    -w    1    -     -      -     31
+5    inode   r-    1    2     file   2048  29
+
+PROCESSES: 7
+PID  PPID  STATE  NSCHED  NAME     FD->FILE
+1    0     sleep  13      init     0->0 1->0 2->0
+2    1     sleep  15      sh       0->0 1->0 2->0
+28   2     sleep  1       sh       0->0 1->0 2->0
+29   28    sleep  8       cat      0->0 1->2 2->0 3->5
+30   28    sleep  1       sh       0->1 1->0 2->0
+31   30    run    9       grep     0->1 1->4 2->0
+32   30    run    9       sysinfo  0->3 1->0 2->0
+\end{minted}
+\caption{\texttt{sysinfo} ở cuối một pipeline}
+\label{fig:demo-pipe}
+\end{figure}
+
+\paragraph{Zombie và reparent.}
+Chương trình \cmd{zombie} của xv6 fork một con rồi \cmd{sleep}; con thoát ngay.
+Chạy \cmd{zombie \&; sysinfo -p} (Hình~\ref{fig:demo-zombie}): pid 36 ở trạng
+thái ZOMBIE và không còn fd nào, chờ cha (pid 35) gọi \cmd{wait}. Pid 35 có
+\cmd{ppid = 1} vì process shell chạy nền đã tạo nó đã thoát, nên nó được
+\cmd{reparent} cho \cmd{init}.
+
+\begin{figure}[H]
+\begin{minted}{text}
+$ zombie &; sysinfo -p
+PROCESSES: 5
+PID  PPID  STATE   NSCHED  NAME     FD->FILE
+1    0     sleep   14      init     0->0 1->0 2->0
+2    1     sleep   17      sh       0->0 1->0 2->0
+33   2     run     2       sysinfo  0->0 1->0 2->0
+36   35    zombie  1       zombie
+35   1     sleep   6       zombie   0->0 1->0 2->0
+\end{minted}
+\caption{Process ZOMBIE và process được giao cho \texttt{init}}
+\label{fig:demo-zombie}
+\end{figure}
+
+\paragraph{Chuyển hướng output.}
+\cmd{sysinfo -f > out} rồi \cmd{cat out} (Hình~\ref{fig:demo-redirect}): file
+\cmd{out} (inode 24) chiếm ô 1 với mode chỉ ghi, và chính là fd 1 của
+\cmd{sysinfo}, đúng như phân tích ở bước 7 của mục~\ref{sec:trace-open}.
+Lệnh \cmd{trace} của Lab0 với mask $2^{23}$ cũng in được tên syscall mới.
+
+\begin{figure}[H]
+\begin{minted}{text}
+$ sysinfo -f > out
+$ cat out
+OPEN FILES: 2
+IDX  TYPE    MODE  REF  INUM  ITYPE  OFF  PIDS
+0    device  rw    8    23    dev    0    1 2 37
+1    inode   -w    1    24    file   0    37
+$ trace 8388608 sysinfo -p
+syscall sysinfo -> 0
+...
+\end{minted}
+\caption{Chuyển hướng output vào file và \texttt{trace} syscall \texttt{sysinfo}}
+\label{fig:demo-redirect}
+\end{figure}
+
+\subsection{Khó khăn và hạn chế}
+
+\begin{itemize}
+  \item \textbf{Kích thước struct:} ban đầu dự định dựng \cmd{struct sysinfo}
+        trong kernel rồi \cmd{copyout} một lần, nhưng 40\,KB vượt quá kernel stack
+        4\,KB. Giải pháp là \cmd{copyout} từng phần tử.
+  \item \textbf{\texttt{printf} của xv6 không hỗ trợ \texttt{\%c}:} bản đầu
+        của bảng in ra ký tự rác ở cột mode, phải đổi sang in chuỗi.
+  \item \textbf{Test bảng file đầy:} bản đầu dùng 8 process con nhưng chỉ đạt
+        93 file, vì mỗi con đã có sẵn 5 fd nên chỉ mở thêm được 11 file. Đã tăng
+        lên 12 process con.
+  \item \textbf{Đọc \texttt{ip->type} không khóa:} trường này được bảo vệ bởi
+        sleep-lock của inode, nhưng không thể ngủ khi đang giữ spinlock
+        \cmd{ftable.lock}. Vì file đang mở (\cmd{ref > 0}) nên inode luôn hợp lệ
+        và loại của nó không đổi, nên việc đọc là an toàn.
+  \item \textbf{Ảnh chụp tại một thời điểm:} kết quả chỉ đúng tại lúc gọi; các
+        process khác có thể thay đổi trạng thái ngay sau đó. Mỗi phần tử là nhất
+        quán, nhưng giữa các phần tử với nhau thì không được bảo đảm
+        (không khóa toàn bộ hệ thống trong suốt lời gọi).
+  \item Các field \cmd{pids[]} và \cmd{fds[]} có kích thước cố định theo
+        \cmd{NPROC} và \cmd{NOFILE}, nên struct khá lớn dù đa số phần tử để trống.
+\end{itemize}

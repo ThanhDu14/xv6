@@ -1,0 +1,395 @@
+\section{Tìm hiểu về Process}
+
+\subsection{Khái niệm process trong xv6}
+
+Process là \emph{đơn vị cách ly} của xv6: một process không
+thể đọc hay phá bộ nhớ, CPU, file descriptor của process khác, cũng không thể
+phá kernel. Để làm được điều này, kernel tạo cho mỗi chương trình hai ảo giác:
+
+\begin{itemize}
+  \item \textbf{Bộ nhớ riêng (address space):} mỗi process có một page table
+        riêng (\cmd{p->pagetable}) ánh xạ địa chỉ ảo bắt đầu từ 0 sang bộ nhớ
+        vật lý. Process này không nhìn thấy bộ nhớ của process khác.
+  \item \textbf{CPU riêng (thread):} kernel luân phiên CPU giữa các process.
+        Khi một process không chạy, các thanh ghi của nó được lưu lại và khôi
+        phục khi nó được chạy tiếp.
+\end{itemize}
+
+Trong xv6 mỗi process có đúng một address space và một thread. Mỗi process có
+\textbf{hai stack}: user stack dùng khi chạy code user và kernel stack
+(\cmd{p->kstack}, 1 trang) dùng khi vào kernel qua system call hoặc
+interrupt. Kernel stack được tách riêng và được bảo vệ để kernel vẫn chạy
+đúng kể cả khi chương trình user làm hỏng user stack của nó.
+
+Kernel quản lý process bằng một mảng cố định \cmd{struct proc proc[NPROC]}
+(\cmd{NPROC = 64}). Không có cấp phát động: tạo process nghĩa là tìm một ô
+có \cmd{state == UNUSED} và điền thông tin vào (\cmd{allocproc()}).
+
+\subsection{Các field \texttt{pid}, \texttt{state}, \texttt{context} của \texttt{struct proc}}
+\label{sec:proc-fields}
+
+\cmd{struct proc} (\cmd{kernel/proc.h}) chứa toàn bộ trạng thái kernel của
+một process. Các field được chia nhóm theo khóa bảo vệ chúng
+(Bảng~\ref{tab:proc-groups}).
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{3.3cm} >{\raggedright\arraybackslash}p{4.3cm} X}
+\toprule
+\textbf{Khóa bảo vệ} & \textbf{Field} & \textbf{Lý do} \\
+\midrule
+\cmd{p->lock} & \cmd{state}, \cmd{pid}, \cmd{chan}, \cmd{killed}, \cmd{xstate}
+  & Được process khác và scheduler trên CPU khác đọc/ghi. \\
+\cmd{wait\_lock} (toàn cục) & \cmd{parent}
+  & Process chưa biết cha mình là ai cho tới khi lấy được khóa, nên không thể
+    dùng khóa riêng của cha. \\
+Không cần khóa & \cmd{kstack}, \cmd{sz}, \cmd{pagetable}, \cmd{trapframe},
+  \cmd{context}, \cmd{ofile}, \cmd{cwd}, \cmd{name}
+  & Chỉ chính process đó sử dụng. \\
+\bottomrule
+\end{tabularx}
+\caption{Các nhóm field của \texttt{struct proc}}
+\label{tab:proc-groups}
+\end{table}
+
+\subsubsection{\texttt{pid} -- định danh process}
+
+\cmd{pid} là số nguyên dương duy nhất, cấp bởi \cmd{allocpid()} khi
+\cmd{allocproc()} tìm được ô trống. Hàm này tăng biến toàn cục \cmd{nextpid}
+dưới khóa \cmd{pid\_lock}, nên hai CPU tạo process cùng lúc không bao giờ nhận
+trùng pid. Process đầu tiên (\cmd{init}) có pid 1. pid không được tái sử dụng
+dù ô \cmd{proc[]} có được dùng lại.
+
+pid được dùng làm giá trị trả về của \cmd{fork()} cho process cha, giá trị trả
+về của \cmd{wait()}, và tham số của \cmd{kill(pid)}. Vì \cmd{kill} và
+\cmd{wait} đọc pid của process khác nên field này phải được bảo vệ bởi
+\cmd{p->lock}: \cmd{kill} cần chắc chắn process nạn nhân không thoát và bị
+cấp phát lại giữa lúc kiểm tra pid và lúc đặt cờ \cmd{killed}.
+
+\subsubsection{\texttt{state} -- trạng thái process}
+
+\cmd{state} có kiểu
+\cmd{enum procstate \{UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE\}},
+cho biết ô trong bảng đang trống, đang được dựng, đang chờ sự kiện, sẵn sàng
+chạy, đang chạy trên một CPU, hay đã kết thúc nhưng chưa được cha thu dọn.
+Hình~\ref{fig:state} và Bảng~\ref{tab:state} mô tả các chuyển trạng thái.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  st/.style={draw, rounded corners, minimum width=2.3cm, minimum height=0.9cm,
+             font=\small\ttfamily, fill=blue!6},
+  ar/.style={-{Stealth[length=2.5mm]}, thick},
+  lb/.style={font=\scriptsize, fill=white, inner sep=1pt},
+  node distance=1.3cm and 2.2cm]
+  \node[st] (unused) {UNUSED};
+  \node[st, right=of unused] (used) {USED};
+  \node[st, right=of used] (runnable) {RUNNABLE};
+  \node[st, below=1.9cm of runnable] (running) {RUNNING};
+  \node[st, below=1.9cm of used] (sleeping) {SLEEPING};
+  \node[st, below=1.9cm of unused] (zombie) {ZOMBIE};
+
+  \draw[ar] (unused) -- node[lb, above]{allocproc} (used);
+  \draw[ar] (used) -- node[lb, above]{fork/userinit} (runnable);
+  \draw[ar] ([xshift=-4mm]runnable.south) -- node[lb, left]{scheduler} ([xshift=-4mm]running.north);
+  \draw[ar] ([xshift=4mm]running.north) -- node[lb, right]{yield} ([xshift=4mm]runnable.south);
+  \draw[ar] (running) -- node[lb, below]{sleep} (sleeping);
+  \draw[ar] (sleeping) -- node[lb, above, sloped]{wakeup} (runnable);
+  \draw[ar] (running.south) -- ++(0,-0.6) -| node[lb, pos=0.25, below]{exit} (zombie.south);
+  \draw[ar] (zombie) -- node[lb, left]{wait (cha) + freeproc} (unused);
+\end{tikzpicture}
+\caption{Sơ đồ chuyển trạng thái của process trong xv6}
+\label{fig:state}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{>{\ttfamily}l X}
+\toprule
+\textrm{\textbf{Chuyển}} & \textbf{Nguyên nhân} \\
+\midrule
+UNUSED $\to$ USED & \cmd{allocproc()} tìm thấy ô trống: gán pid, cấp trang
+  trapframe, tạo page table, đặt \cmd{context.ra = forkret}. \\
+USED $\to$ RUNNABLE & Cuối \cmd{fork()} (hoặc \cmd{userinit()}), sau khi đã
+  dựng xong toàn bộ process con. \\
+RUNNABLE $\to$ RUNNING & \cmd{scheduler()} chọn process để chạy. \\
+RUNNING $\to$ RUNNABLE & \cmd{yield()}: hết lượt do timer interrupt. \\
+RUNNING $\to$ SLEEPING & \cmd{sleep(chan)}: chờ sự kiện (đọc pipe, \cmd{wait},
+  đọc console, \ldots); \cmd{p->chan} ghi lại kênh đang chờ. \\
+SLEEPING $\to$ RUNNABLE & \cmd{wakeup(chan)} từ process khác hoặc interrupt. \\
+RUNNING $\to$ ZOMBIE & \cmd{exit()}: đóng file, giao con cho \cmd{init},
+  đánh thức cha, lưu \cmd{xstate}. \\
+ZOMBIE $\to$ UNUSED & \cmd{wait()} của cha lấy mã thoát rồi gọi
+  \cmd{freeproc()}. \\
+\bottomrule
+\end{tabularx}
+\caption{Các chuyển trạng thái và hàm gây ra chúng}
+\label{tab:state}
+\end{table}
+
+Trạng thái \cmd{ZOMBIE} cần thiết vì hai lý do: process cha
+có thể chưa gọi \cmd{wait} khi con thoát nên kernel phải giữ lại mã thoát;
+và một process không thể tự giải phóng kernel stack mà nó đang chạy trên đó.
+Nếu cha thoát trước con, \cmd{exit()} gọi \cmd{reparent()} để giao các con
+cho \cmd{init}, process luôn gọi \cmd{wait} trong vòng lặp, nên mọi process
+con đều có người thu dọn.
+
+Trạng thái \cmd{USED} là trạng thái trung gian khi process đang được dựng.
+Scheduler chỉ chạy process \cmd{RUNNABLE}, nên một process đang dựng dở bị
+``che'' khỏi scheduler cho tới khi \cmd{fork()} đặt nó thành \cmd{RUNNABLE}
+ở bước cuối cùng.
+
+\subsubsection{\texttt{context} -- ngữ cảnh kernel thread}
+
+\cmd{struct context} lưu 14 thanh ghi của \emph{kernel thread} của process:
+\cmd{ra}, \cmd{sp} và các thanh ghi callee-saved \cmd{s0}--\cmd{s11}. Nó
+được dùng bởi hàm assembly \cmd{swtch(old, new)} (\cmd{kernel/swtch.S}):
+lưu các thanh ghi hiện tại vào \cmd{old}, nạp các thanh ghi từ \cmd{new},
+rồi \cmd{ret}.
+
+\begin{itemize}
+  \item \cmd{swtch} chỉ lưu các thanh ghi callee-saved, vì trình biên dịch C đã
+        lưu các thanh ghi caller-saved lên stack trước khi gọi hàm.
+  \item \cmd{swtch} không lưu \cmd{pc}, mà lưu \cmd{ra}. Khi \cmd{ret}, CPU nhảy tới \cmd{ra} vừa
+        nạp, tức là ngay sau lệnh gọi \cmd{swtch} trước đây của thread kia.
+  \item Vì \cmd{sp} cũng được nạp lại, CPU chuyển sang chạy trên stack của
+        thread kia.
+\end{itemize}
+
+Mỗi CPU cũng có một \cmd{context} trong \cmd{struct cpu}, là ngữ cảnh của
+\emph{scheduler thread} của CPU đó. Process chuyển CPU bằng
+\cmd{swtch(\&p->context, \&mycpu()->context)} và scheduler chuyển CPU cho
+process bằng \cmd{swtch(\&c->context, \&p->context)}.
+
+Cần phân biệt \cmd{context} với \cmd{trapframe} (Bảng~\ref{tab:ctx-tf}):
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{l X X}
+\toprule
+ & \cmd{p->trapframe} & \cmd{p->context} \\
+\midrule
+Lưu gì & Toàn bộ thanh ghi \emph{user} (\cmd{epc}, \cmd{sp}, \cmd{a0}--\cmd{a7}, \ldots)
+       & \cmd{ra}, \cmd{sp}, \cmd{s0}--\cmd{s11} của \emph{kernel thread} \\
+Khi nào & User $\to$ kernel (system call, interrupt)
+        & Kernel thread $\to$ scheduler (\cmd{swtch}) \\
+Ai lưu & \cmd{uservec} trong \cmd{trampoline.S} & \cmd{swtch.S} \\
+Mục đích & Quay về đúng lệnh trong chương trình user
+         & Quay về đúng chỗ trong code kernel \\
+\bottomrule
+\end{tabularx}
+\caption{So sánh \texttt{trapframe} và \texttt{context}}
+\label{tab:ctx-tf}
+\end{table}
+
+Khi \cmd{allocproc()} tạo process mới, nó đặt \cmd{context.ra = forkret} và
+\cmd{context.sp = p->kstack + PGSIZE}. Do đó lần đầu scheduler \cmd{swtch} vào
+process mới, CPU ``quay về'' đầu hàm \cmd{forkret()} trên kernel stack rỗng
+của process đó.
+
+\subsection{Trace system call \texttt{fork}}
+\label{sec:trace-fork}
+
+\subsubsection{Từ user vào kernel}
+
+\begin{enumerate}
+  \item Chương trình user gọi \cmd{fork()}. Hàm này được sinh bởi
+        \cmd{user/usys.pl}: nạp số hiệu \cmd{SYS\_fork} vào thanh ghi \cmd{a7}
+        rồi thực thi lệnh \cmd{ecall}.
+  \item \cmd{ecall} chuyển CPU sang supervisor mode và nhảy tới \cmd{uservec}
+        (\cmd{kernel/trampoline.S}). \cmd{uservec} lưu toàn bộ thanh ghi user
+        vào \cmd{p->trapframe}, chuyển sang page table kernel và kernel stack
+        của process, rồi gọi \cmd{usertrap()}.
+  \item \cmd{usertrap()} (\cmd{kernel/trap.c}) thấy \cmd{scause == 8}
+        (system call), tăng \cmd{trapframe->epc} thêm 4 để khi trở về sẽ chạy
+        lệnh sau \cmd{ecall}, bật interrupt và gọi \cmd{syscall()}.
+  \item \cmd{syscall()} đọc \cmd{a7}, tra bảng \cmd{syscalls[]} và gọi
+        \cmd{sys\_fork()}, hàm này chỉ gọi \cmd{fork()} trong \cmd{kernel/proc.c}.
+        Giá trị trả về được ghi vào \cmd{trapframe->a0}.
+\end{enumerate}
+
+\subsubsection{Hàm \texttt{fork()} trong kernel}
+
+\begin{enumerate}
+  \item \textbf{Cấp phát process:} \cmd{allocproc()} duyệt \cmd{proc[]}, tìm
+        ô \cmd{UNUSED}, gán pid mới, chuyển sang \cmd{USED}, cấp trang
+        trapframe, tạo page table rỗng (chỉ có trampoline và trapframe) và
+        khởi tạo \cmd{context}. Hàm trả về với \cmd{np->lock} đang được giữ.
+        Nếu hết ô hoặc hết bộ nhớ, \cmd{fork} trả về $-1$.
+  \item \textbf{Sao chép bộ nhớ:} \cmd{uvmcopy()} cấp trang mới và chép toàn
+        bộ bộ nhớ user (code, data, stack, heap) của cha sang con, rồi đặt
+        \cmd{np->sz = p->sz}. Hai process có nội dung bộ nhớ giống nhau nhưng
+        nằm ở các trang vật lý khác nhau.
+  \item \textbf{Sao chép thanh ghi user:} \cmd{*(np->trapframe) = *(p->trapframe)}.
+        Do đó khi con trở về user space, nó tiếp tục chạy ngay sau lệnh
+        \cmd{ecall} của \cmd{fork}, giống hệt cha.
+  \item \textbf{Giá trị trả về của con:} \cmd{np->trapframe->a0 = 0}. Đây là
+        điểm khác duy nhất giữa thanh ghi của cha và con, giải thích vì sao
+        \cmd{fork} ``trả về hai lần'': 0 ở con, pid của con ở cha.
+  \item \textbf{Chia sẻ file đang mở:} với mỗi \cmd{p->ofile[i]} khác 0,
+        gán \cmd{np->ofile[i]} bằng \cmd{filedup(p->ofile[i])}. \cmd{filedup} chỉ tăng
+        \cmd{ref} của \cmd{struct file} chứ không mở file mới, nên cha và con
+        dùng chung offset. Thư mục hiện tại được chia sẻ bằng \cmd{idup(p->cwd)}.
+  \item \textbf{Tên:} chép \cmd{p->name} sang \cmd{np->name}.
+  \item \textbf{Ghi nhận cha:} nhả \cmd{np->lock}, lấy \cmd{wait\_lock}, đặt
+        \cmd{np->parent = p}.
+  \item \textbf{Cho phép chạy:} lấy lại \cmd{np->lock}, đặt
+        \cmd{np->state = RUNNABLE}. Chỉ từ lúc này scheduler mới có thể chọn
+        process con.
+  \item Trả về pid của con. Giá trị này đi qua \cmd{trapframe->a0} của cha.
+\end{enumerate}
+
+\subsubsection{Lần chạy đầu tiên của process con}
+
+Khi một CPU chọn process con, \cmd{scheduler()} gọi
+\cmd{swtch(\&c->context, \&np->context)}. Vì \cmd{context.ra = forkret}, CPU
+nhảy vào \cmd{forkret()}. Hàm này nhả \cmd{p->lock} (khóa được scheduler lấy
+trước khi \cmd{swtch}, xem mục~\ref{sec:lock-swtch}), lần đầu tiên thì khởi
+tạo file system, rồi gọi \cmd{usertrapret()}. \cmd{usertrapret()} và
+\cmd{userret} nạp lại thanh ghi user từ trapframe đã sao chép ở bước 3 và
+thực thi \cmd{sret}. Process con trở về user space ngay sau lệnh \cmd{ecall},
+với \cmd{a0 = 0}.
+
+Process cha trở về theo đường bình thường: \cmd{syscall()} ghi pid vào
+\cmd{a0}, \cmd{usertrap()} gọi \cmd{usertrapret()} và cha tiếp tục chạy. Thứ
+tự cha hay con chạy trước phụ thuộc vào scheduler.
+
+\subsection{Cơ chế lập lịch: \texttt{scheduler()}, \texttt{sched()}, \texttt{yield()}}
+\label{sec:sched}
+
+\subsubsection{Khi nào CPU chuyển sang process khác}
+
+xv6 chuyển process trong hai trường hợp:
+\begin{itemize}
+  \item \textbf{Tự nguyện:} process gọi một system call phải chờ (\cmd{read},
+        \cmd{wait}, \cmd{sleep}, \ldots) và đi vào \cmd{sleep()}.
+  \item \textbf{Bắt buộc:} timer interrupt định kỳ. Khi \cmd{devintr()} trả
+        về 2 (timer), \cmd{usertrap()} hoặc \cmd{kerneltrap()} gọi
+        \cmd{yield()}, ép process đang tính toán nhường CPU.
+\end{itemize}
+
+\subsubsection{\texttt{scheduler()}}
+
+Mỗi CPU, sau khi khởi động xong, gọi \cmd{scheduler()} và không bao giờ
+quay lại. Hàm này là một vòng lặp vô hạn chạy trên stack riêng của CPU
+(scheduler thread):
+
+\begin{enumerate}
+  \item Bật interrupt (tránh deadlock khi mọi process đều đang chờ I/O).
+  \item Duyệt lần lượt \cmd{proc[0..NPROC-1]}. Với mỗi \cmd{p}: lấy
+        \cmd{p->lock}; nếu \cmd{p->state == RUNNABLE} thì đặt
+        \cmd{p->state = RUNNING}, \cmd{c->proc = p}, rồi
+        \cmd{swtch(\&c->context, \&p->context)} để chạy \cmd{p}.
+  \item Khi \cmd{p} nhường CPU, \cmd{swtch} ``trả về'' trong scheduler. Đặt
+        \cmd{c->proc = 0}, nhả \cmd{p->lock} và xét process tiếp theo.
+  \item Nếu duyệt hết bảng mà không có process nào \cmd{RUNNABLE}, CPU thực thi
+        \cmd{wfi} để nghỉ tới interrupt tiếp theo.
+\end{enumerate}
+
+Chính sách này là \textbf{round robin}: các process được chạy lần lượt,
+không có độ ưu tiên. Scheduler chạy trên stack riêng thay vì
+stack của một process, vì nếu dùng stack của process thì process đó có thể
+được đánh thức và chạy trên CPU khác, dẫn tới hai CPU dùng chung một stack.
+
+\subsubsection{\texttt{sched()}}
+
+\cmd{sched()} là \emph{điểm duy nhất} một kernel thread nhường CPU cho
+scheduler. Trước khi gọi \cmd{swtch(\&p->context, \&mycpu()->context)}, nó
+kiểm tra bốn điều kiện, vi phạm bất kỳ điều kiện nào sẽ gây \cmd{panic}:
+\begin{itemize}
+  \item đang giữ \cmd{p->lock};
+  \item chỉ giữ đúng một khóa (\cmd{mycpu()->noff == 1}), vì giữ thêm khóa
+        khác qua \cmd{swtch} có thể gây deadlock;
+  \item \cmd{p->state != RUNNING}, tức là người gọi đã đổi trạng thái;
+  \item interrupt đang tắt.
+\end{itemize}
+\cmd{sched()} cũng lưu và khôi phục \cmd{intena}, vì đây là thuộc tính của
+kernel thread chứ không phải của CPU. Mọi nơi muốn nhường CPU (\cmd{yield},
+\cmd{sleep}, \cmd{exit}) đều làm theo cùng một mẫu: lấy \cmd{p->lock}, đổi
+\cmd{p->state}, gọi \cmd{sched()}.
+
+\subsubsection{\texttt{yield()}}
+
+\cmd{yield()} là cách nhường CPU khi hết lượt: lấy \cmd{p->lock}, đặt
+\cmd{p->state = RUNNABLE}, gọi \cmd{sched()}. Khi process được chọn chạy lại,
+\cmd{sched()} trả về và \cmd{yield()} nhả \cmd{p->lock}. Process ở trạng
+thái \cmd{RUNNABLE} nên sẽ được scheduler chọn lại ở một vòng duyệt sau.
+
+\subsubsection{Toàn bộ quá trình chuyển process}
+
+Hình~\ref{fig:switch} mô tả việc
+chuyển từ process \cmd{shell} sang process \cmd{cat} trên một CPU. Mỗi lần
+chuyển gồm \textbf{hai} lần \cmd{swtch}: process $\to$ scheduler và
+scheduler $\to$ process mới. \cmd{sched} và \cmd{scheduler} luân phiên
+chuyển quyền điều khiển cho nhau, nên chúng được gọi là các \emph{coroutine}.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners, font=\scriptsize\ttfamily, align=center,
+              minimum height=0.75cm, fill=blue!5},
+  ar/.style={-{Stealth[length=2mm]}, thick},
+  lb/.style={font=\scriptsize, align=center}]
+  % user / kernel boundary
+  \draw[dashed, gray] (-1.2,0) -- (13.2,0);
+  \node[font=\scriptsize, gray] at (6,0.25) {user space};
+  \node[font=\scriptsize, gray] at (6,-0.25) {kernel space};
+
+  \node[box, fill=green!8] (sh) at (0,1.1) {shell\\(user)};
+  \node[box] (ut) at (0,-1.2) {usertrap};
+  \node[box] (y) at (0,-2.5) {yield\\sched};
+  \node[box, fill=orange!12] (sc) at (6,-2.5) {scheduler\\(stack CPU)};
+  \node[box] (s2) at (12,-2.5) {sched\\yield};
+  \node[box] (ur) at (12,-1.2) {usertrapret};
+  \node[box, fill=green!8] (cat) at (12,1.1) {cat\\(user)};
+
+  \draw[ar] (sh) -- node[lb, right, pos=0.25, fill=white]{timer interrupt} (ut);
+  \draw[ar] (ut) -- (y);
+  \draw[ar] (y) -- node[lb, above]{swtch(\&shell->context,\\\&cpu->context)} (sc);
+  \draw[ar] (sc) -- node[lb, above]{swtch(\&cpu->context,\\\&cat->context)} (s2);
+  \draw[ar] (s2) -- (ur);
+  \draw[ar] (ur) -- node[lb, left, pos=0.75, fill=white]{sret} (cat);
+
+  \node[lb, below=0.15cm of y] {kstack shell};
+  \node[lb, below=0.15cm of sc] {release(shell->lock)\\acquire(cat->lock)};
+  \node[lb, below=0.15cm of s2] {kstack cat};
+\end{tikzpicture}
+\caption{Chuyển CPU từ \texttt{shell} sang \texttt{cat}}
+\label{fig:switch}
+\end{figure}
+
+\subsubsection{Khóa \texttt{p->lock} được giữ qua \texttt{swtch}}
+\label{sec:lock-swtch}
+
+Thông thường thread nào lấy khóa thì chính thread đó nhả khóa. Trong xv6,
+\cmd{p->lock} được giữ xuyên qua \cmd{swtch}:
+\begin{itemize}
+  \item \cmd{yield()} của \cmd{shell} lấy \cmd{shell->lock}, nhưng
+        \cmd{scheduler()} mới là nơi nhả nó.
+  \item \cmd{scheduler()} lấy \cmd{cat->lock}, nhưng \cmd{yield()} của
+        \cmd{cat} (hoặc \cmd{forkret()} nếu \cmd{cat} vừa được tạo) mới nhả nó.
+\end{itemize}
+Lý do: nếu \cmd{shell->lock} được nhả ngay sau khi đặt
+\cmd{state = RUNNABLE} nhưng trước khi \cmd{swtch} lưu xong ngữ cảnh, scheduler
+của một CPU khác có thể chọn \cmd{shell} và chạy nó trên chính kernel stack
+mà CPU hiện tại vẫn đang dùng. Giữ khóa tới khi \cmd{swtch} hoàn tất đảm bảo
+mỗi process chỉ chạy trên đúng một CPU tại một thời điểm.
+
+\subsubsection{Liên hệ với phần cài đặt \texttt{sysinfo}}
+
+Để trả về ``number of scheduling events'' theo yêu cầu 4.2, nhóm thêm field
+\cmd{nsched} vào \cmd{struct proc}:
+\begin{itemize}
+  \item Khởi tạo bằng 0 trong \cmd{allocproc()}, vì ô \cmd{proc[]} được dùng
+        lại cho process mới.
+  \item Tăng 1 trong \cmd{scheduler()} ngay sau \cmd{p->state = RUNNING} và
+        trước \cmd{swtch}. Đây là nơi duy nhất một process được cấp CPU, nên
+        \cmd{nsched} đếm chính xác số lần process được lập lịch. Tại điểm này
+        scheduler đang giữ \cmd{p->lock}, nên hai CPU không thể cùng tăng biến.
+\end{itemize}
+Khi đọc thông tin process, \cmd{sysinfo} lấy \cmd{wait\_lock} trước rồi mới
+lấy \cmd{p->lock}, cùng thứ tự với \cmd{wait()} và \cmd{exit()}, để đọc
+\cmd{parent} đúng mà không gây deadlock.

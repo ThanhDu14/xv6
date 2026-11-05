@@ -1,0 +1,57 @@
+\section{Tổng quan}
+
+\subsection{Mức độ hoàn thành}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{c >{\raggedright\arraybackslash}X c c}
+\toprule
+\textbf{STT} & \textbf{Yêu cầu} & \textbf{Mức độ} & \textbf{Mục} \\
+\midrule
+\multicolumn{4}{l}{\textit{4.1 -- Tìm hiểu và báo cáo}} \\
+1 & Field \cmd{ofile[]} của \cmd{struct proc}, \cmd{file[]} của \cmd{struct ftable} & 100\% & \ref{sec:ofile-ftable} \\
+2 & Trace system call \cmd{open} & 100\% & \ref{sec:trace-open} \\
+3 & So sánh cách dùng file descriptor trong \cmd{open()}, \cmd{dup()}, \cmd{fork()} & 100\% & \ref{sec:compare-fd} \\
+4 & Field \cmd{pid}, \cmd{state}, \cmd{context} của \cmd{struct proc} & 100\% & \ref{sec:proc-fields} \\
+5 & Trace system call \cmd{fork} & 100\% & \ref{sec:trace-fork} \\
+6 & Cơ chế lập lịch \cmd{scheduler()}, \cmd{sched()}, \cmd{yield()} & 100\% & \ref{sec:sched} \\
+\midrule
+\multicolumn{4}{l}{\textit{4.2 -- Cài đặt}} \\
+7 & System call \cmd{sysinfo}: danh sách file đang mở & 100\% & \ref{sec:sysinfo} \\
+8 & System call \cmd{sysinfo}: danh sách process khác \cmd{UNUSED} & 100\% & \ref{sec:sysinfo} \\
+9 & Chương trình test \cmd{user/sysinfotest.c} (10 nhóm test) & 100\% & \ref{sec:testing} \\
+\bottomrule
+\end{tabularx}
+\caption{Mức độ hoàn thành các yêu cầu}
+\end{table}
+
+Ngoài yêu cầu của đề, nhóm viết thêm lệnh \cmd{sysinfo} (\cmd{user/sysinfo.c})
+để quan sát trạng thái hệ thống khi chạy các chương trình thật trong shell
+(mục~\ref{sec:demo}).
+
+\subsection{Phân công công việc}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{l l X c}
+\toprule
+\textbf{MSSV} & \textbf{Họ tên} & \textbf{Công việc} & \textbf{Hoàn thành} \\
+\midrule
+24120282 & Nguyễn Quốc Đạt & \textit{(cần điền)} & 100\% \\
+24120288 & Nguyễn Thành Dự & \textit{(cần điền)} & 100\% \\
+24120294 & Nguyễn Đức Duy  & \textit{(cần điền)} & 100\% \\
+\bottomrule
+\end{tabularx}
+\caption{Phân công công việc}
+\end{table}
+
+\subsection{Môi trường thực hiện}
+
+\begin{itemize}
+  \item Mã nguồn: xv6-labs-2024 (MIT 6.1810), nhánh \cmd{util}.
+  \item Hệ điều hành: Ubuntu Linux; trình biên dịch \cmd{riscv64-linux-gnu-gcc};
+        giả lập \cmd{qemu-system-riscv64} với 3 CPU (\cmd{-smp 3}).
+  \item Biên dịch và chạy: \cmd{make qemu}; thoát QEMU bằng \cmd{Ctrl-a x}.
+\end{itemize}

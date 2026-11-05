@@ -1,0 +1,91 @@
+% Biên dịch: xelatex -shell-escape main.tex (chạy 2 lần)
+% Trên Overleaf: chọn compiler XeLaTeX hoặc pdfLaTeX đều được.
+\documentclass[a4paper]{article}
+\usepackage{iftex}
+\ifXeTeX
+  \usepackage{fontspec}
+\else
+  \usepackage{vntex}
+\fi
+\usepackage{a4wide,amssymb,latexsym,array,hhline,fancyhdr}
+\usepackage{caption}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{float}
+\usepackage{lastpage}
+\usepackage{graphicx}
+\usepackage{tabularx}
+\usepackage{multirow}
+\usepackage{geometry}
+\usepackage{setspace}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,shapes.geometric,calc}
+\usepackage{hyperref}
+% minted v3 cần latexminted, bản đi kèm Ubuntu bị lỗi với Python 3.14 nên ưu tiên minted2
+\IfFileExists{minted2.sty}{\usepackage{minted2}}{\usepackage{minted}}
+\usepackage{indentfirst}
+\usepackage{xcolor}
+\usepackage{longtable}
+\usepackage[shortlabels]{enumitem}
+\renewcommand{\baselinestretch}{1.4}
+\hypersetup{urlcolor=blue,linkcolor=black,citecolor=black,colorlinks=true}
+
+\setlength{\headheight}{40pt}
+\pagestyle{fancy}
+\fancyhead{}
+\fancyhead[L]{
+ \begin{tabular}{rl}
+    \begin{picture}(25,15)(0,0)
+    \put(0,-8){\includegraphics[width=8mm, height=8mm]{images/khtn.png}}
+    \end{picture}&
+	\begin{tabular}{l}
+		\textbf{\bf \ttfamily Trường đại học Khoa Học Tự Nhiên TP.HCM}\\
+		\textbf{\bf \ttfamily Khoa Công Nghệ Thông Tin}
+	\end{tabular}
+ \end{tabular}
+}
+\fancyfoot{}
+\fancyfoot[L]{\scriptsize \ttfamily Hệ điều hành -- Project 1: File \& Process Management}
+\fancyfoot[R]{\scriptsize \ttfamily Trang {\thepage}/\pageref{LastPage}}
+\renewcommand{\headrulewidth}{0.3pt}
+\renewcommand{\footrulewidth}{0.3pt}
+
+\setcounter{secnumdepth}{3}
+\setcounter{tocdepth}{3}
+
+%%% Khung code
+\setminted{
+  frame=single,
+  bgcolor=lightgray!20,
+  fontsize=\footnotesize,
+  baselinestretch=1,
+  breaklines=true,
+  breakanywhere=true,
+}
+
+\newcommand{\cmd}[1]{\texttt{#1}}
+\setlength{\emergencystretch}{3em}
+
+\begin{document}
+
+\include{sections/title}
+\thispagestyle{empty}
+
+\newpage
+\renewcommand{\contentsname}{Mục lục}
+\renewcommand{\tablename}{Bảng}
+\renewcommand{\figurename}{Hình}
+\renewcommand{\refname}{Tài liệu tham khảo}
+\tableofcontents
+
+\newpage
+\renewcommand{\arraystretch}{1.3}
+\setcounter{page}{1}
+
+\include{sections/overview}
+\include{sections/file}
+\include{sections/process}
+\include{sections/sysinfo}
+\include{sections/references}
+
+\end{document}
